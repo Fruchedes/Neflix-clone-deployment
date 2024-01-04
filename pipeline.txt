@@ -1,0 +1,94 @@
+
+pipeline{
+    agent any
+    tools{
+        jdk 'jdk17'
+        nodejs 'node16'
+    }
+    environment {
+        SCANNER_HOME=tool 'sonar-scanner'
+    }
+    stages {
+        stage('clean workspace'){
+            steps{
+                cleanWs()
+            }
+        }
+        stage('Checkout from Git'){
+            steps{
+                git branch: 'main', url: 'https://github.com/N4si/DevSecOps-Project.git'
+            }
+        }
+        stage("Sonarqube Analysis "){
+            steps{
+                withSonarQubeEnv('sonar-server') {
+                    sh ''' $SCANNER_HOME/bin/sonar-scanner -Dsonar.projectName=Netflix \
+                    -Dsonar.projectKey=Netflix '''
+                }
+            }
+        }
+        stage("quality gate"){
+           steps {
+                script {
+                    waitForQualityGate abortPipeline: false, credentialsId: 'Sonar-token' 
+                }
+            } 
+        }
+        stage('Install Dependencies') {
+            steps {
+                sh "npm install"
+            }
+        }
+        stage('OWASP FS SCAN') {
+            steps {
+                dependencyCheck additionalArguments: '--scan ./ --disableYarnAudit --disableNodeAudit', odcInstallation: 'DP-Check'
+                dependencyCheckPublisher pattern: '**/dependency-check-report.xml'
+            }
+        }
+        stage('TRIVY FS SCAN') {
+            steps {
+                sh "trivy fs . > trivyfs.txt"
+            }
+        }
+        stage("Docker Build & Push"){
+            steps{
+                script{
+                   withDockerRegistry(credentialsId: 'docker', toolName: 'docker'){   
+                       sh "docker build --build-arg TMDB_V3_API_KEY=9c76e4922bf4e0e40460d4237d16ef23 -t netflix ."
+                       sh "docker tag netflix bunny21/netflix:latest "
+                       sh "docker push bunny21/netflix:latest "
+                    }
+                }
+            }
+        }
+        stage("TRIVY"){
+            steps{
+                sh "trivy image bunny21/netflix:latest > trivyimage.txt" 
+            }
+        }
+        stage('Deploy to container'){
+            steps{
+                sh 'docker run -d -p 8081:80 bunny21/netflix:latest'
+            }
+        }
+        
+    }
+    post("Send Email"){
+            
+        always{
+            emailext (
+                attachLog: true,                        // Attach build logs to the email
+                subject: "Build Result: ${currentBuild.result}",  // Subject of the email
+                body: "Project Name: ${env.JOB_NAME}<br/>" +    // Email body
+                      "Build Number: ${env.BUILD_NUMBER}<br/>" +
+                      "Build URL: ${env.BUILD_URL}<br/>" +
+                      "Timestamp: ${new Date()}",
+                to: 'rohanmane372@gmail.com',      // Email recipient
+                attachmentsPattern: 'trivyfs.txt,trivyimage.txt'  // Attach specific files if they exist
+            )
+        }
+            
+    }
+    
+}
+
